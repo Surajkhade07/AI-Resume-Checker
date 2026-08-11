@@ -42,16 +42,19 @@ async def lifespan(app: FastAPI):
     async def _load_embedder():
         logger.info(f"Loading Sentence Transformer: {SENTENCE_TRANSFORMER_MODEL}")
         try:
-            embedder = await asyncio.to_thread(SentenceTransformer, SENTENCE_TRANSFORMER_MODEL)
+            embedder = await asyncio.to_thread(SentenceTransformer, SENTENCE_TRANSFORMER_MODEL, device="cpu")
             logger.info(f"Loaded {SENTENCE_TRANSFORMER_MODEL}")
             return embedder
         except Exception as e:
             logger.error(f"Failed to load SentenceTransformer: {e}")
             return None
 
-    # Load both models concurrently in parallel for fastest startup
-    nlp_model, embedder_model = await asyncio.gather(_load_spacy(), _load_embedder())
+    # Load sequentially instead of in parallel — avoids both models
+    # peaking in memory at the same time during startup.
+    nlp_model = await _load_spacy()
     app.state.nlp = nlp_model
+
+    embedder_model = await _load_embedder()
     app.state.embedder = embedder_model
 
     # In-memory job store for short-lived job tracking (job_id -> result/status)
