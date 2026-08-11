@@ -237,6 +237,8 @@ async def _delete_supabase(analysis_id: str, user_id: str, headers: dict) -> boo
                 if fb_res.status_code in (200, 204):
                     _detected_supabase_table = "resume_analysis"
                     return True
+    except Exception as exc:
+        logger.warning(f"Supabase delete skipped: {exc}")
     return False
 
 async def save_analysis(user_id: str, filename: str, analysis_result: Dict) -> Optional[str]:
