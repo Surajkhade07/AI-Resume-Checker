@@ -1,48 +1,24 @@
-# =========================================================
-# PyTorch - CPU only
-# =========================================================
-
 --index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://pypi.org/simple
 
 torch==2.3.1+cpu
-
-
-# =========================================================
-# Backend - FastAPI
-# =========================================================
-
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.6
 python-multipart==0.0.20
 python-dotenv==1.0.1
-
-
-# =========================================================
-# NLP / ML
-# =========================================================
-
 spacy==3.7.5
 sentence-transformers==3.3.1
 numpy==1.26.4
 rapidfuzz==3.11.0
-
-# Resume file parsing
 pdfplumber==0.11.5
 PyPDF2==3.0.1
 python-docx==1.1.2
 python-magic==0.4.27
-
-# PDF report generation
 jinja2==3.1.5
 weasyprint==63.1
-
-# External services
 httpx==0.28.1
 groq==0.15.0
 PyJWT[crypto]==2.10.1
 supabase==2.13.0
-
-# HTTP / frontend utilities
 requests==2.32.3

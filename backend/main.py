@@ -6,8 +6,6 @@ from contextlib import asynccontextmanager
 import spacy
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from sentence_transformers import SentenceTransformer
 
 from backend.core.config import (
     ALLOWED_ORIGINS,
@@ -31,7 +29,7 @@ logger = logging.getLogger("ats_resume_scorer")
 
 async def _load_spacy():
     logger.info(
-        "Loading spaCy NLP model: %s",
+        "Loading spaCy model: %s",
         SPACY_MODEL_PRIMARY,
     )
 
@@ -42,7 +40,7 @@ async def _load_spacy():
         )
 
         logger.info(
-            "Successfully loaded spaCy model: %s",
+            "spaCy model loaded: %s",
             SPACY_MODEL_PRIMARY,
         )
 
@@ -50,7 +48,7 @@ async def _load_spacy():
 
     except OSError:
         logger.warning(
-            "%s not found. Falling back to %s",
+            "spaCy model %s not found. Trying %s",
             SPACY_MODEL_PRIMARY,
             SPACY_MODEL_SECONDARY,
         )
@@ -62,7 +60,7 @@ async def _load_spacy():
             )
 
             logger.info(
-                "Successfully loaded fallback spaCy model: %s",
+                "Fallback spaCy model loaded: %s",
                 SPACY_MODEL_SECONDARY,
             )
 
@@ -70,7 +68,7 @@ async def _load_spacy():
 
         except Exception as exc:
             logger.exception(
-                "Failed to load fallback spaCy model: %s",
+                "Fallback spaCy model failed: %s",
                 exc,
             )
 
@@ -78,7 +76,7 @@ async def _load_spacy():
 
     except Exception as exc:
         logger.exception(
-            "Unexpected error loading spaCy model: %s",
+            "Unexpected spaCy loading error: %s",
             exc,
         )
 
@@ -92,14 +90,21 @@ async def _load_embedder():
     )
 
     try:
+        from sentence_transformers import SentenceTransformer
+
         embedder = await asyncio.to_thread(
             SentenceTransformer,
             SENTENCE_TRANSFORMER_MODEL,
             device="cpu",
         )
 
+        try:
+            embedder.max_seq_length = 256
+        except Exception:
+            pass
+
         logger.info(
-            "Successfully loaded Sentence Transformer: %s",
+            "Sentence Transformer loaded: %s",
             SENTENCE_TRANSFORMER_MODEL,
         )
 
@@ -107,7 +112,7 @@ async def _load_embedder():
 
     except Exception as exc:
         logger.exception(
-            "Failed to load Sentence Transformer: %s",
+            "Sentence Transformer loading failed: %s",
             exc,
         )
 
@@ -115,8 +120,6 @@ async def _load_embedder():
 
 
 async def initialize_models(app: FastAPI):
-    logger.info("Starting background model initialization")
-
     app.state.models_ready = False
     app.state.models_error = None
 
@@ -125,20 +128,23 @@ async def initialize_models(app: FastAPI):
 
         app.state.nlp = await _load_spacy()
 
-        logger.info("STEP 1/2: spaCy loading completed")
+        logger.info("STEP 1/2 completed")
 
-        logger.info("STEP 2/2: Loading Sentence Transformer")
+        logger.info(
+            "STEP 2/2: Loading Sentence Transformer"
+        )
 
         app.state.embedder = await _load_embedder()
 
         if app.state.embedder is None:
             app.state.models_error = (
-                "Sentence Transformer could not be loaded."
+                "Sentence Transformer failed to load."
             )
+
             app.state.models_ready = False
 
             logger.error(
-                "Sentence Transformer failed to load."
+                "AI models are not ready."
             )
 
             return
@@ -146,14 +152,18 @@ async def initialize_models(app: FastAPI):
         app.state.models_ready = True
         app.state.models_error = None
 
-        logger.info("ALL MODELS LOADED")
-        logger.info("AI ANALYSIS IS READY")
-
-    except asyncio.CancelledError:
         logger.info(
-            "Background model initialization cancelled."
+            "========================================"
         )
-        raise
+        logger.info(
+            "ALL MODELS LOADED"
+        )
+        logger.info(
+            "API IS READY"
+        )
+        logger.info(
+            "========================================"
+        )
 
     except Exception as exc:
         logger.exception(
@@ -168,7 +178,13 @@ async def initialize_models(app: FastAPI):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(
+        "========================================"
+    )
+    logger.info(
         "Starting ATS Resume Analysis API"
+    )
+    logger.info(
+        "========================================"
     )
 
     app.state._job_results = {}
@@ -186,7 +202,7 @@ async def lifespan(app: FastAPI):
     )
 
     logger.info(
-        "FastAPI startup completed"
+        "FastAPI server startup completed"
     )
 
     yield
@@ -222,42 +238,6 @@ app = FastAPI(
 )
 
 
-@app.get("/health")
-async def root_health():
-    return {
-        "status": "ok",
-        "service": APP_NAME,
-    }
-
-
-@app.get("/ready")
-async def root_readiness():
-    models_ready = getattr(
-        app.state,
-        "models_ready",
-        False,
-    )
-
-    if not models_ready:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "starting",
-                "models_ready": False,
-                "error": getattr(
-                    app.state,
-                    "models_error",
-                    None,
-                ),
-            },
-        )
-
-    return {
-        "status": "ready",
-        "models_ready": True,
-    }
-
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -271,6 +251,37 @@ app.add_middleware(
 
 
 app.include_router(router)
+
+
+@app.get("/health")
+async def root_health():
+    return {
+        "status": "healthy",
+        "service": APP_NAME,
+    }
+
+
+@app.get("/ready")
+async def root_ready():
+    if not getattr(
+        app.state,
+        "models_ready",
+        False,
+    ):
+        return {
+            "status": "starting",
+            "models_ready": False,
+            "error": getattr(
+                app.state,
+                "models_error",
+                None,
+            ),
+        }
+
+    return {
+        "status": "ready",
+        "models_ready": True,
+    }
 
 
 if __name__ == "__main__":

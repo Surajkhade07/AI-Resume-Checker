@@ -4,6 +4,7 @@ import uuid
 
 from datetime import datetime, timezone
 from time import perf_counter
+from typing import List
 
 from fastapi import (
     APIRouter,
@@ -20,7 +21,10 @@ from backend.api.auth import get_current_user
 from backend.models.schemas import AnalysisResponce
 
 
-logger = logging.getLogger("ats_resume_scorer")
+logger = logging.getLogger(
+    "ats_resume_scorer"
+)
+
 
 router = APIRouter(
     prefix="/api/v1",
@@ -49,35 +53,18 @@ def _clean(text: str) -> str:
 @router.get("/health")
 async def health_check():
     return {
-        "status": "ok",
-        "service": "ATS Resume Analysis API",
+        "status": "healthy",
     }
 
 
 @router.get("/ready")
-async def readiness_check(request: Request):
+async def ready_check(
+    request: Request,
+):
     models_ready = getattr(
         request.app.state,
         "models_ready",
         False,
-    )
-
-    nlp_loaded = (
-        getattr(
-            request.app.state,
-            "nlp",
-            None,
-        )
-        is not None
-    )
-
-    embedder_loaded = (
-        getattr(
-            request.app.state,
-            "embedder",
-            None,
-        )
-        is not None
     )
 
     if not models_ready:
@@ -86,8 +73,6 @@ async def readiness_check(request: Request):
             content={
                 "status": "starting",
                 "models_ready": False,
-                "nlp_loaded": nlp_loaded,
-                "embedder_loaded": embedder_loaded,
                 "error": getattr(
                     request.app.state,
                     "models_error",
@@ -99,52 +84,73 @@ async def readiness_check(request: Request):
     return {
         "status": "ready",
         "models_ready": True,
-        "nlp_loaded": True,
-        "embedder_loaded": True,
+        "nlp_loaded": (
+            getattr(
+                request.app.state,
+                "nlp",
+                None,
+            )
+            is not None
+        ),
+        "embedder_loaded": (
+            getattr(
+                request.app.state,
+                "embedder",
+                None,
+            )
+            is not None
+        ),
     }
 
 
-@router.post("/analyze-resume")
+@router.post(
+    "/analyze-resume",
+    response_model=AnalysisResponce,
+)
 async def analyze_resume(
     request: Request,
     resume: UploadFile = File(...),
     job_description: str = Form(""),
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(
+        get_current_user
+    ),
 ):
     logger.info(
-        "Received analyze-resume request from user=%s",
+        "Received resume analysis request "
+        "from user=%s",
         user_id,
     )
 
-    models_ready = getattr(
+    if not getattr(
         request.app.state,
         "models_ready",
         False,
-    )
-
-    if not models_ready:
+    ):
         raise HTTPException(
             status_code=503,
             detail=(
                 "AI models are still loading. "
-                "Please try again in a few seconds."
+                "Please try again shortly."
             ),
         )
 
     try:
         file_bytes = await resume.read()
-        filename = resume.filename or "resume"
+
+        filename = (
+            resume.filename
+            or "resume"
+        )
 
     except Exception as exc:
         logger.exception(
-            "Failed to read uploaded file: %s",
-            exc,
+            "Failed to read uploaded file"
         )
 
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Could not read uploaded resume: {exc}"
+                f"Could not read resume: {exc}"
             ),
         )
 
@@ -155,45 +161,44 @@ async def analyze_resume(
 
         parse_start = perf_counter()
 
-        resume_text, _metadata = parse_resume_file(
-            file_bytes,
-            filename,
+        resume_text, metadata = (
+            parse_resume_file(
+                file_bytes,
+                filename,
+            )
         )
 
         parse_end = perf_counter()
 
         parse_ms = int(
-            (parse_end - parse_start) * 1000
+            (parse_end - parse_start)
+            * 1000
         )
 
         logger.info(
-            "Parsed '%s': %d chars extracted "
-            "(parse_ms=%d)",
+            "Parsed %s: %d chars",
             filename,
             len(resume_text),
-            parse_ms,
         )
 
     except Exception as exc:
         logger.exception(
-            "File parsing failed: %s",
-            exc,
+            "Resume parsing failed"
         )
 
         raise HTTPException(
             status_code=422,
             detail=(
-                f"Could not read or parse "
-                f"the resume: {exc}"
+                f"Could not parse resume: {exc}"
             ),
         )
 
-    if not resume_text or not resume_text.strip():
+    if not resume_text.strip():
         raise HTTPException(
             status_code=422,
             detail=(
-                "No readable text could be extracted "
-                "from the uploaded resume."
+                "No readable text found "
+                "in the resume."
             ),
         )
 
@@ -220,7 +225,7 @@ async def analyze_resume(
         },
     }
 
-    async def _run_analysis_and_store():
+    async def run_analysis():
         try:
             from backend.services.resume_analyzer import (
                 analyze_full_resume,
@@ -240,13 +245,13 @@ async def analyze_resume(
 
             if nlp is None:
                 raise RuntimeError(
-                    "spaCy model is not available."
+                    "spaCy model is unavailable."
                 )
 
             if embedder is None:
                 raise RuntimeError(
-                    "Sentence Transformer model "
-                    "is not available."
+                    "Sentence Transformer "
+                    "model is unavailable."
                 )
 
             semaphore = getattr(
@@ -257,7 +262,7 @@ async def analyze_resume(
 
             analysis_start = perf_counter()
 
-            if semaphore is not None:
+            if semaphore:
                 async with semaphore:
                     result = await asyncio.to_thread(
                         analyze_full_resume,
@@ -295,11 +300,10 @@ async def analyze_resume(
                     result,
                 )
 
-            except Exception as exc_save:
+            except Exception as exc:
                 logger.warning(
-                    "History save failed for job %s: %s",
-                    job_id,
-                    exc_save,
+                    "History save failed: %s",
+                    exc,
                 )
 
             app_state._job_results[job_id] = {
@@ -312,29 +316,20 @@ async def analyze_resume(
                     ).isoformat()
                 ),
                 "timings": {
-                    "analysis_ms": analysis_ms,
                     "parse_ms": parse_ms,
+                    "analysis_ms": analysis_ms,
                 },
             }
 
             logger.info(
-                "Job %s completed successfully",
+                "Analysis completed: %s",
                 job_id,
             )
 
-        except asyncio.CancelledError:
-            app_state._job_results[job_id] = {
-                "status": "cancelled",
-            }
-
-            raise
-
         except Exception as exc:
             logger.exception(
-                "Background analysis failed "
-                "for job %s: %s",
+                "Analysis failed: %s",
                 job_id,
-                exc,
             )
 
             app_state._job_results[job_id] = {
@@ -343,7 +338,7 @@ async def analyze_resume(
             }
 
     asyncio.create_task(
-        _run_analysis_and_store()
+        run_analysis()
     )
 
     return JSONResponse(
@@ -355,7 +350,9 @@ async def analyze_resume(
     )
 
 
-@router.get("/analysis/{job_id}")
+@router.get(
+    "/analysis/{job_id}"
+)
 async def get_analysis_status(
     request: Request,
     job_id: str,
@@ -366,15 +363,17 @@ async def get_analysis_status(
         None,
     )
 
-    if job_results is None:
+    if not job_results:
         raise HTTPException(
             status_code=404,
             detail="Job not found",
         )
 
-    job = job_results.get(job_id)
+    job = job_results.get(
+        job_id
+    )
 
-    if job is None:
+    if not job:
         raise HTTPException(
             status_code=404,
             detail="Job not found",
@@ -385,19 +384,22 @@ async def get_analysis_status(
 
 @router.get("/history")
 async def get_history(
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(
+        get_current_user
+    ),
 ):
     from backend.database.supabase_db import (
         get_user_history,
     )
 
     try:
-        return await get_user_history(user_id)
+        return await get_user_history(
+            user_id
+        )
 
     except Exception as exc:
         logger.exception(
-            "History fetch failed: %s",
-            exc,
+            "History fetch failed"
         )
 
         raise HTTPException(
@@ -408,10 +410,14 @@ async def get_history(
         )
 
 
-@router.delete("/history/{analysis_id}")
+@router.delete(
+    "/history/{analysis_id}"
+)
 async def delete_history_entry(
     analysis_id: str,
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(
+        get_current_user
+    ),
 ):
     from backend.database.supabase_db import (
         delete_analysis,
@@ -427,8 +433,8 @@ async def delete_history_entry(
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    "Analysis not found or "
-                    "not owned by this user."
+                    "Analysis not found "
+                    "or not owned by this user."
                 ),
             )
 
@@ -442,8 +448,7 @@ async def delete_history_entry(
 
     except Exception as exc:
         logger.exception(
-            "History delete failed: %s",
-            exc,
+            "History delete failed"
         )
 
         raise HTTPException(
@@ -454,10 +459,14 @@ async def delete_history_entry(
         )
 
 
-@router.post("/generate-pdf")
+@router.post(
+    "/generate-pdf"
+)
 async def generate_pdf(
     data: AnalysisResponce,
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(
+        get_current_user
+    ),
 ):
     from backend.services.report_generator import (
         generate_html_reports,
@@ -480,17 +489,15 @@ async def generate_pdf(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": (
+                "Content-Disposition":
                     "attachment; "
                     "filename=ats_report.pdf"
-                )
             },
         )
 
     except Exception as exc:
         logger.exception(
-            "Failed to generate PDF: %s",
-            exc,
+            "PDF generation failed"
         )
 
         raise HTTPException(
@@ -501,10 +508,14 @@ async def generate_pdf(
         )
 
 
-@router.get("/history/{analysis_id}/pdf")
+@router.get(
+    "/history/{analysis_id}/pdf"
+)
 async def generate_history_pdf(
     analysis_id: str,
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(
+        get_current_user
+    ),
 ):
     from backend.database.supabase_db import (
         get_user_history,
@@ -525,8 +536,7 @@ async def generate_history_pdf(
 
     except Exception as exc:
         logger.exception(
-            "Failed to fetch history: %s",
-            exc,
+            "History loading failed"
         )
 
         raise HTTPException(
@@ -538,9 +548,12 @@ async def generate_history_pdf(
 
     analysis_data = next(
         (
-            item.get("analysis_result")
+            item.get(
+                "analysis_result"
+            )
             for item in history
-            if item.get("id") == analysis_id
+            if item.get("id")
+            == analysis_id
         ),
         None,
     )
@@ -564,17 +577,15 @@ async def generate_history_pdf(
             content=pdf_bytes,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": (
+                "Content-Disposition":
                     f"attachment; "
                     f"filename=ats_report_{analysis_id}.pdf"
-                )
             },
         )
 
     except Exception as exc:
         logger.exception(
-            "Failed to generate PDF for history: %s",
-            exc,
+            "History PDF generation failed"
         )
 
         raise HTTPException(
