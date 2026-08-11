@@ -1,7 +1,12 @@
+import asyncio
 import logging
-from fastapi import FastAPI
+import os
 from contextlib import asynccontextmanager
+
+import spacy
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sentence_transformers import SentenceTransformer
 
 from backend.core.config import (
     ALLOWED_ORIGINS,
@@ -14,83 +19,238 @@ from backend.core.config import (
 )
 from backend.api.route import router
 
+
+# ---------------------------------------------------------
+# Logging
+# ---------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
 logger = logging.getLogger("ats resume scorer")
+
+
+# ---------------------------------------------------------
+# spaCy loader
+# ---------------------------------------------------------
+
+async def _load_spacy():
+    logger.info(
+        "Loading spaCy NLP model: %s",
+        SPACY_MODEL_PRIMARY,
+    )
+
+    try:
+        nlp = await asyncio.to_thread(
+            spacy.load,
+            SPACY_MODEL_PRIMARY,
+        )
+
+        logger.info(
+            "Successfully loaded spaCy model: %s",
+            SPACY_MODEL_PRIMARY,
+        )
+
+        return nlp
+
+    except OSError:
+        logger.warning(
+            "%s not found. Falling back to %s",
+            SPACY_MODEL_PRIMARY,
+            SPACY_MODEL_SECONDARY,
+        )
+
+        try:
+            nlp = await asyncio.to_thread(
+                spacy.load,
+                SPACY_MODEL_SECONDARY,
+            )
+
+            logger.info(
+                "Successfully loaded fallback spaCy model: %s",
+                SPACY_MODEL_SECONDARY,
+            )
+
+            return nlp
+
+        except Exception as e:
+            logger.exception(
+                "Failed to load spaCy fallback: %s",
+                e,
+            )
+
+            logger.warning(
+                "Using blank English spaCy model instead."
+            )
+
+            return spacy.blank("en")
+
+    except Exception as e:
+        logger.exception(
+            "Unexpected error loading spaCy model: %s",
+            e,
+        )
+
+        logger.warning(
+            "Using blank English spaCy model instead."
+        )
+
+        return spacy.blank("en")
+
+
+# ---------------------------------------------------------
+# Sentence Transformer loader
+# ---------------------------------------------------------
+
+async def _load_embedder():
+    logger.info(
+        "Loading Sentence Transformer: %s",
+        SENTENCE_TRANSFORMER_MODEL,
+    )
+
+    try:
+        embedder = await asyncio.to_thread(
+            SentenceTransformer,
+            SENTENCE_TRANSFORMER_MODEL,
+            device="cpu",
+        )
+
+        logger.info(
+            "Successfully loaded Sentence Transformer: %s",
+            SENTENCE_TRANSFORMER_MODEL,
+        )
+
+        return embedder
+
+    except Exception as e:
+        logger.exception(
+            "Failed to load Sentence Transformer: %s",
+            e,
+        )
+
+        # Don't crash the entire API if the embedding model fails.
+        return None
+
+
+# ---------------------------------------------------------
+# Application lifespan
+# ---------------------------------------------------------
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting ATS Resume Analysis API...")
-    import asyncio
-    import spacy
-    from sentence_transformers import SentenceTransformer
+    logger.info("========================================")
+    logger.info("Starting ATS Resume Analysis API")
+    logger.info("========================================")
 
-    async def _load_spacy():
-        logger.info(f"Loading spaCy NLP model: {SPACY_MODEL_PRIMARY}")
-        try:
-            nlp = await asyncio.to_thread(spacy.load, SPACY_MODEL_PRIMARY)
-            logger.info(f"Loaded {SPACY_MODEL_PRIMARY}")
-            return nlp
-        except OSError:
-            logger.warning(f"{SPACY_MODEL_PRIMARY} not found — falling back to {SPACY_MODEL_SECONDARY}")
-            try:
-                nlp = await asyncio.to_thread(spacy.load, SPACY_MODEL_SECONDARY)
-                logger.info(f"Loaded {SPACY_MODEL_SECONDARY} (fallback)")
-                return nlp
-            except Exception as e:
-                logger.error(f"Failed to load spaCy fallback: {e}. Using blank English model.")
-                return spacy.blank("en")
-
-    async def _load_embedder():
-        logger.info(f"Loading Sentence Transformer: {SENTENCE_TRANSFORMER_MODEL}")
-        try:
-            embedder = await asyncio.to_thread(SentenceTransformer, SENTENCE_TRANSFORMER_MODEL, device="cpu")
-            logger.info(f"Loaded {SENTENCE_TRANSFORMER_MODEL}")
-            return embedder
-        except Exception as e:
-            logger.error(f"Failed to load SentenceTransformer: {e}")
-            return None
-
-    # Load sequentially instead of in parallel — avoids both models
-    # peaking in memory at the same time during startup.
-    nlp_model = await _load_spacy()
-    app.state.nlp = nlp_model
-
-    embedder_model = await _load_embedder()
-    app.state.embedder = embedder_model
-
-    # In-memory job store for short-lived job tracking (job_id -> result/status)
+    # In-memory job store
     app.state._job_results = {}
 
-    logger.info("All models loaded. API is ready to serve requests.")
+    # -----------------------------------------------------
+    # Load spaCy
+    # -----------------------------------------------------
+
+    logger.info("STEP 1/2: Starting spaCy model loading...")
+
+    nlp_model = await _load_spacy()
+
+    app.state.nlp = nlp_model
+
+    logger.info("STEP 1/2: spaCy loading completed.")
+
+    # -----------------------------------------------------
+    # Load Sentence Transformer
+    # -----------------------------------------------------
+
+    logger.info("STEP 2/2: Starting Sentence Transformer loading...")
+
+    embedder_model = await _load_embedder()
+
+    app.state.embedder = embedder_model
+
+    if embedder_model is None:
+        logger.warning(
+            "Sentence Transformer is unavailable. "
+            "Embedding functionality may not work."
+        )
+    else:
+        logger.info(
+            "STEP 2/2: Sentence Transformer loading completed."
+        )
+
+    # -----------------------------------------------------
+    # Startup complete
+    # -----------------------------------------------------
+
+    logger.info("========================================")
+    logger.info("ALL MODELS LOADED")
+    logger.info("API IS READY TO SERVE REQUESTS")
+    logger.info("========================================")
 
     yield
-    logger.info("Shutting down the API...")
 
-app=FastAPI(
-        title=APP_NAME,
-        description=APP_DESCRIPTION,
-        version=APP_VERSION,
-        lifespan=lifespan,
-        docs_url='/docs',
-        redoc_url='/redoc'
-    )
+    # -----------------------------------------------------
+    # Shutdown
+    # -----------------------------------------------------
 
+    logger.info("Shutting down ATS Resume Analysis API...")
+
+    # Release model references
+    app.state.nlp = None
+    app.state.embedder = None
+    app.state._job_results = {}
+
+    logger.info("API shutdown complete.")
+
+
+# ---------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------
+
+app = FastAPI(
+    title=APP_NAME,
+    description=APP_DESCRIPTION,
+    version=APP_VERSION,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+
+# ---------------------------------------------------------
+# CORS
+# ---------------------------------------------------------
 
 app.add_middleware(
-        CORSMiddleware,
-        allow_origins=ALLOWED_ORIGINS,
-        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------------------------------------------------------
+# Routes
+# ---------------------------------------------------------
 
 app.include_router(router)
 
-if __name__=='__main__':
-        import uvicorn
-        uvicorn.run(
-            'backend.main:app',
-            host='0.0.0.0',
-            port=8000,
-            reload=True              #Auto restart on code changes
-        )
+
+# ---------------------------------------------------------
+# Local development
+# ---------------------------------------------------------
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.getenv("PORT", "8000"))
+
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+    )
