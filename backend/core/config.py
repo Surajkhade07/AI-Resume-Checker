@@ -20,6 +20,14 @@ ALLOWED_ORIGINS = [
     "https://ats-resume-scorer-kappa.vercel.app",
 ]
 
+FRONTEND_URL = os.getenv("FRONTEND_URL")
+
+if FRONTEND_URL:
+    FRONTEND_URL = FRONTEND_URL.rstrip("/")
+
+    if FRONTEND_URL not in ALLOWED_ORIGINS:
+        ALLOWED_ORIGINS.append(FRONTEND_URL)
+
 
 MAX_FILE_SIZE_MB = 5
 
