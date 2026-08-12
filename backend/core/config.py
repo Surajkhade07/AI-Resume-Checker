@@ -18,6 +18,7 @@ APP_DESCRIPTION = (
 
 ALLOWED_ORIGINS = [
     "https://ats-resume-scorer-kappa.vercel.app",
+    "ats-resume-scorer-j5yo7d8zl-surajkhade07s-projects.vercel.app"
 ]
 
 FRONTEND_URL = os.getenv("FRONTEND_URL")
