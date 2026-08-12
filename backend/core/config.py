@@ -21,15 +21,6 @@ ALLOWED_ORIGINS = [
     "ats-resume-scorer-j5yo7d8zl-surajkhade07s-projects.vercel.app"
 ]
 
-FRONTEND_URL = os.getenv("FRONTEND_URL")
-
-if FRONTEND_URL:
-    FRONTEND_URL = FRONTEND_URL.rstrip("/")
-
-    if FRONTEND_URL not in ALLOWED_ORIGINS:
-        ALLOWED_ORIGINS.append(FRONTEND_URL)
-
-
 MAX_FILE_SIZE_MB = 5
 
 MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024
