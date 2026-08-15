@@ -1,302 +1,381 @@
+"""
+Resume analyzer orchestrator that coordinates the full analysis pipeline.
+Combines resume parsing, Groq LLM extraction, ATS scoring, JD matching,
+feedback generation, and recommendations into a single analysis flow.
+"""
 import logging
-import spacy
-from sentence_transformers import SentenceTransformer
-from typing import Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-from backend.models.schemas import IssueDetail
+from backend.services.resume_parser import parse_resume_file
 from backend.services.groq_parser import parse_resume, parse_job_description
-from backend.services.jd_matcher import compare_resume_with_jd
-from backend.services.feedback_engine import analyze_issues, generate_issues_summary
 from backend.services.ats_scorer import (
-    calculate_overall_score,
-    validate_skills_with_projects,
-    detect_location_info,
-    generate_critical_issues,
-    generate_improvements,
+    compute_component_scores,
+    compute_ats_score,
+    compute_penalties_and_bonuses,
+    generate_score_interpretation,
 )
-from backend.services.recommendation_engine import (
-    generate_all_recommendations,
-    format_recommendations_for_api,
-    get_recommendation_summary,
-)
-from backend.util.file_utils import (
-    get_default_grammar_results,
-    get_default_location_results,
-)
+from backend.services.feedback_engine import generate_all_feedback, generate_issues_summary
+from backend.services.model_loader import ensure_embedder, ensure_nlp_model
+from backend.services.recommendation_engine import generate_recommendations
 
 logger = logging.getLogger('ats_resume_scorer')
 
 
-def analyze_full_resume(
-    resume_text: str,
-    nlp: Optional[spacy.Language],
-    embedder: Optional[SentenceTransformer],
-    job_description: Optional[str] = None,
-) -> Dict:
-    parsed_resume = parse_resume(resume_text)
-    logger.info(f"Groq parsed summary: {parsed_resume.get('professional_summary', '')[:100]!r}")
-    logger.info(f"Groq parsed skills count: {len(parsed_resume.get('skills', []))}")
-    logger.info(f"Groq parsed experience count: {len(parsed_resume.get('experience', []))}")
+def _extract_text_from_file(file_data: bytes, filename: str) -> Tuple[str, Dict]:
+    """
+    Extract text and metadata from an uploaded resume file.
+    """
+    logger.info(f"Starting text extraction for: {filename}")
+    text, metadata = parse_resume_file(file_data, filename)
+    logger.info(f"Text extraction complete: {len(text)} chars from {filename}")
+    return text, metadata
 
-    skills          = parsed_resume.get('skills', [])
-    projects        = parsed_resume.get('projects', [])
-    keywords        = parsed_resume.get('keywords', [])
-    action_verbs    = parsed_resume.get('action_verbs', [])
 
-    experience_months = sum(
-        int(e.get('duration_months', 0))
-        for e in parsed_resume.get('experience', [])
-        if isinstance(e, dict)
-    )
+def _parse_resume_with_groq(raw_text: str) -> Dict:
+    """
+    Parse resume text using Groq LLM to extract structured data.
+    """
+    logger.info("Parsing resume with Groq LLM...")
+    parsed_data = parse_resume(raw_text)
 
-    contact_info = {
-        'name':      parsed_resume.get('name'),
-        'email':     parsed_resume.get('email'),
-        'phone':     parsed_resume.get('phone'),
-        'linkedin':  parsed_resume.get('linkedin'),
-        'github':    parsed_resume.get('github'),
-        'portfolio': parsed_resume.get('portfolio'),
-    }
-
-    # 1. Skill validation against experience & projects
-    skill_validation = validate_skills_with_projects(
-        skills=skills,
-        projects=projects,
-        experience_entries=parsed_resume.get('experience', []),
-        resume_text=resume_text,
-        embedder=embedder,
-    )
-
-    # 2. Location & Privacy risk detection
-    if nlp is not None:
-        try:
-            location_results = detect_location_info(resume_text, nlp)
-        except Exception as exc:
-            logger.warning(f"Location detection failed, using fallback: {exc}")
-            location_results = get_default_location_results()
-    else:
-        location_results = get_default_location_results()
-
-    # 3. Job Description parsing & comparison (if provided)
-    jd_comparison_result = None
-    jd_keywords = None
-    parsed_jd = None
-    if job_description and job_description.strip():
-        parsed_jd = parse_job_description(job_description.strip())
-        jd_keywords = list(set(
-            parsed_jd.get('keywords', []) +
-            parsed_jd.get('required_skills', []) +
-            parsed_jd.get('preferred_skills', [])
-        ))
-        jd_comparison_result = compare_resume_with_jd(
-            resume_text=resume_text,
-            resume_keywords=keywords,
-            resume_skills=skills,
-            jd_text=job_description.strip(),
-            jd_keywords=jd_keywords,
-            embedder=embedder,
-            nlp=nlp,
+    method = parsed_data.pop('parsed_via', 'groq')
+    if method != 'groq':
+        logger.warning(
+            f"Resume parsed via '{method}' fallback (Groq unavailable). "
+            f"{len(parsed_data.get('skills', []))} skills, "
+            f"{len(parsed_data.get('experience', []))} experiences detected locally."
         )
+    else:
+        logger.info(
+            f"Groq parsing complete: {len(parsed_data.get('skills', []))} skills, "
+            f"{len(parsed_data.get('experience', []))} experiences"
+        )
+    return parsed_data
 
-    grammar_results = get_default_grammar_results()
 
-    # 4. ATS Scoring calculation
-    scores = calculate_overall_score(
-        text=resume_text,
-        parsed_resume=parsed_resume,
-        skills=skills,
-        keywords=keywords,
-        action_verbs=action_verbs,
-        skill_validation_results=skill_validation,
-        grammar_results=grammar_results,
-        location_results=location_results,
-        jd_keywords=jd_keywords,
-        experience_months=experience_months,
-    )
+def _parse_jd_with_groq(jd_text: str) -> Dict:
+    """
+    Parse job description text using Groq LLM to extract structured data.
+    """
+    logger.info("Parsing job description with Groq LLM...")
+    jd_data = parse_job_description(jd_text)
 
-    # 5. Feedback engine issues
-    detailed_feedback = analyze_issues(
+    method = jd_data.pop('parsed_via', 'groq')
+    if method != 'groq':
+        logger.warning(
+            f"Job description parsed via '{method}' fallback (Groq unavailable). "
+            f"{len(jd_data.get('required_skills', []))} required skills detected locally."
+        )
+    else:
+        logger.info(
+            f"JD parsing complete: {len(jd_data.get('required_skills', []))} required skills, "
+            f"{len(jd_data.get('keywords', []))} keywords"
+        )
+    return jd_data
+
+
+def _perform_jd_matching(
+    resume_text: str,
+    parsed_data: Dict,
+    jd_data: Dict,
+    app_state,
+) -> Optional[Dict]:
+    """
+    Perform JD matching analysis if both resume and JD data are available.
+    """
+    if not jd_data:
+        return None
+    
+    logger.info("Performing JD matching analysis...")
+    embedder = ensure_embedder(app_state)
+    nlp = ensure_nlp_model(app_state)
+
+    if embedder is None or nlp is None:
+        logger.warning("JD matching skipped because NLP or embedding models are unavailable")
+        return None
+    
+    try:
+        from backend.services.jd_matcher import compare_resume_with_jd
+    except ImportError as e:
+        logger.warning(f"JD matcher unavailable: {e}")
+        return None
+
+    jd_match = compare_resume_with_jd(
         resume_text=resume_text,
-        parsed_resume=parsed_resume,
-        skills=skills,
-        projects=projects,
-        action_verbs=action_verbs,
-        skill_validation=skill_validation,
-        scores=scores,
-        contact_info=contact_info,
+        resume_keywords=parsed_data.get('keywords', []),
+        resume_skills=parsed_data.get('skills', []),
+        jd_text=jd_data.get('raw_text', ''),
+        jd_keywords=jd_data.get('keywords', []),
+        embedder=embedder,
+        nlp=nlp,
     )
-    issues_summary = generate_issues_summary(detailed_feedback)
 
-    # 6. Critical issues & Improvements
-    critical_issues = generate_critical_issues(scores, grammar_results, location_results)
-    improvements = generate_improvements(scores, skill_validation)
+    logger.info(f"JD matching complete: {jd_match.get('match_percentage', 0):.1f}% match")
+    return jd_match
 
-    # 7. Recommendation engine
-    sections = {
-        'summary': parsed_resume.get('professional_summary', ''),
-        'experience': ' '.join(
-            f"{e.get('job_title', '')} {e.get('company', '')} {e.get('description', '')}"
-            for e in parsed_resume.get('experience', []) if isinstance(e, dict)
-        ),
-        'education': ' '.join(
-            f"{e.get('degree', '') or ''} {e.get('institution', '') or ''}"
-            for e in parsed_resume.get('education', []) if isinstance(e, dict)
-        ),
-        'skills': ' '.join(skills),
-        'projects': ' '.join(
-            f"{p.get('title', '')} {p.get('description', '')}"
-            for p in projects if isinstance(p, dict)
-        ),
-    }
 
-    recs_result = generate_all_recommendations(
-        skill_validation_results=skill_validation,
-        grammar_results=grammar_results,
-        location_results=location_results,
-        score_results=scores,
-        sections=sections,
-        keyword_analysis=jd_comparison_result,
-        resume_keywords=keywords,
-    )
-    api_recommendations = format_recommendations_for_api(recs_result)
-    recommendation_summary = get_recommendation_summary(recs_result)
-    estimated_improvement = recs_result.get('estimated_improvement', 0.0)
-
-    # 8. Skill validation details packaging
-    validated_raw   = skill_validation.get('validated_skills', [])
-    unvalidated_raw = skill_validation.get('unvalidated_skills', [])
-    total_skills    = len(validated_raw) + len(unvalidated_raw)
-    val_pct         = round((len(validated_raw) / total_skills * 100) if total_skills > 0 else 0, 1)
-
-    skill_validation_details = {
-        "validated": [
+def _compute_skill_validation(parsed_data: Dict) -> Dict:
+    """
+    Compute skill validation by checking which skills are backed by project/experience evidence.
+    """
+    skills = parsed_data.get('skills', [])
+    experience = parsed_data.get('experience', [])
+    projects = parsed_data.get('projects', [])
+    
+    # Collect all text from experiences and projects for validation
+    evidence_text = ""
+    for exp in experience:
+        if isinstance(exp, dict):
+            evidence_text += (exp.get('description', '') + ' ').lower()
+    for proj in projects:
+        if isinstance(proj, dict):
+            evidence_text += (proj.get('description', '') + ' ').lower()
+            evidence_text += ' '.join(proj.get('technologies', [])) + ' '
+    
+    validated = []
+    unvalidated = []
+    
+    for skill in skills:
+        skill_lower = str(skill).lower().strip()
+        if skill_lower in evidence_text:
+            validated.append(skill)
+        else:
+            unvalidated.append(skill)
+    
+    total = len(skills)
+    validated_count = len(validated)
+    validation_pct = (validated_count / total * 100) if total > 0 else 0.0
+    
+    # Build skill-project mapping
+    skill_project_mapping = {}
+    for skill in validated:
+        skill_lower = str(skill).lower().strip()
+        related_projects = []
+        for proj in projects:
+            if isinstance(proj, dict):
+                techs = [str(t).lower() for t in proj.get('technologies', [])]
+                if skill_lower in techs or skill_lower in proj.get('description', '').lower():
+                    related_projects.append(proj.get('title', 'Project'))
+        if related_projects:
+            skill_project_mapping[skill] = related_projects
+    
+    return {
+        'validated': [
             {
-                "skill":      item['skill'],
-                "projects":   item.get('projects', []),
-                "similarity": item.get('similarity', 1.0),
+                'skill': s,
+                'projects': skill_project_mapping.get(s, []),
+                'similarity': 1.0,
             }
-            for item in validated_raw
+            for s in validated
         ],
-        "unvalidated":     unvalidated_raw,
-        "total":           total_skills,
-        "validated_count": len(validated_raw),
-        "validation_pct":  val_pct,
+        'unvalidated': unvalidated,
+        'total': total,
+        'validated_count': validated_count,
+        'validation_pct': round(validation_pct, 1),
+        'skill_project_mapping': skill_project_mapping,
     }
 
-    # 9. Location & Privacy details packaging
-    location_analysis = {
-        "location_found":     location_results.get('location_found', False),
-        "detected_locations": location_results.get('detected_locations', []),
-        "privacy_risk":       location_results.get('privacy_risk', 'none'),
-        "recommendations":    location_results.get('recommendations', []),
-        "penalty_applied":    location_results.get('penalty_applied', 0.0),
-    }
 
-    # 10. Candidate profile packaging
-    resume_profile = {
-        "candidate_info":          contact_info,
-        "professional_summary":    parsed_resume.get('professional_summary', ''),
-        "skills":                  skills,
-        "experience":              parsed_resume.get('experience', []),
-        "education":               parsed_resume.get('education', []),
-        "certifications":          parsed_resume.get('certifications', []),
-        "projects":                projects,
-        "action_verbs":            action_verbs,
-        "keywords":                keywords,
-        "total_experience_months": experience_months,
-    }
-
-    # 11. Parsed JD packaging
-    parsed_jd_data = None
-    if parsed_jd:
-        parsed_jd_data = {
-            "job_title":            parsed_jd.get('job_title', ''),
-            "required_skills":      parsed_jd.get('required_skills', []),
-            "preferred_skills":     parsed_jd.get('preferred_skills', []),
-            "experience_required":  parsed_jd.get('experience_required', ''),
-            "education_required":   parsed_jd.get('education_required', ''),
-            "key_responsibilities": parsed_jd.get('key_responsibilities', []),
-            "keywords":             parsed_jd.get('keywords', []),
-        }
-
-    keyword_match_val = (
-        jd_comparison_result['match_percentage']
-        if jd_comparison_result else scores['keywords_score'] / 25.0 * 100.0
+def _analyze_location_and_privacy(parsed_data: Dict, raw_text: str) -> Dict[str, Any]:
+    """
+    Analyze location data and privacy risk for candidate contact safety.
+    """
+    detected = []
+    
+    # Check for street address patterns
+    street_pattern = re.compile(
+        r'\b\d+\s+[A-Za-z0-9\s,.-]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Way|Court|Ct)\b',
+        re.IGNORECASE,
     )
+    for match in street_pattern.findall(raw_text)[:3]:
+        detected.append({'type': 'Full Street Address', 'text': match.strip()})
+        
+    # Check for zip/postal code patterns in header area
+    zip_pattern = re.compile(r'\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b|\b\d{5}(?:-\d{4})?\b|\b\d{6}\b')
+    for line in raw_text.splitlines()[:20]:
+        zips = zip_pattern.findall(line)
+        for z in zips[:2]:
+            if not any(d['text'] == z for d in detected):
+                detected.append({'type': 'Postal / Zip Code', 'text': z})
+
+    privacy_risk = "none"
+    penalty = 0.0
+    recommendations = []
+    
+    if any(d['type'] == 'Full Street Address' for d in detected):
+        privacy_risk = "high"
+        penalty = 5.0
+        recommendations.append("Remove exact street address to protect personal privacy. Modern ATS systems only require City, State / Country.")
+    elif detected:
+        privacy_risk = "medium"
+        recommendations.append("Consider simplifying location to City, State/Country for standard remote and hybrid ATS matching.")
+    else:
+        privacy_risk = "none"
 
     return {
-        "ATS_score":              scores['overall_score'],
-        "ats_score":              scores['overall_score'],
-        "component_scores": {
-            "formatting":         scores['formatting_score'],
-            "keywords":           scores['keywords_score'],
-            "content":            scores['content_score'],
-            "skill_validation":   scores['skill_validation_score'],
-            "ats_compatibility":  scores['ats_compatibility_score'],
-        },
-        "issues_summary":         issues_summary,
-        "critical_issues":        critical_issues,
-        "improvements":           improvements,
-        "detailed_feedback":      detailed_feedback,
-        "recommendations":        api_recommendations,
-        "recommendation_summary": recommendation_summary,
-        "estimated_improvement":  estimated_improvement,
-        "jd_match_analysis":      jd_comparison_result,
-        "jd_comparison":          jd_comparison_result,
-        "parsed_jd":              parsed_jd_data,
-        "skill_validation_details": skill_validation_details,
-        "location_analysis":      location_analysis,
-        "penalties":              scores.get('penalties', {}),
-        "bonuses":                scores.get('bonuses', {}),
-        "resume_profile":         resume_profile,
-        "skills":                 skills,
-        "matched_keywords": (
-            jd_comparison_result['matched_keywords']
-            if jd_comparison_result else list(keywords[:25])
-        ),
-        "missing_keywords": (
-            jd_comparison_result['missing_keywords']
-            if jd_comparison_result else []
-        ),
-        "strengths": _generate_strengths(
-            parsed_resume, skills, projects, action_verbs, skill_validation, scores
-        ),
-        "interpretation":         scores.get('overall_interpretation', ''),
-        "keyword_match":          round(keyword_match_val, 1),
-        "experience_months":      experience_months,
+        'privacy_risk': privacy_risk,
+        'detected_locations': detected,
+        'recommendations': recommendations,
+        'penalty_applied': penalty,
     }
 
 
-def _generate_strengths(
-    parsed_resume: Dict, skills: List, projects: List,
-    action_verbs: List, skill_validation: Dict, scores: Dict,
-) -> List[str]:
-    """Generate a list of things the resume does well, based on actual structured data."""
-    strengths = []
-
-    if parsed_resume.get('experience'):
-        strengths.append("Has a dedicated Experience section")
-    if parsed_resume.get('projects') or len(projects) > 0:
-        strengths.append("Includes a Projects section showcasing applied skills")
-    if parsed_resume.get('education'):
-        strengths.append("Education section is present")
-    if parsed_resume.get('skills'):
-        strengths.append("Clear Skills section with listed technologies")
-    if parsed_resume.get('professional_summary', '').strip():
-        strengths.append("Professional Summary provides a quick overview")
-
-    if len(skills) >= 8:
-        strengths.append(f"Strong skill set — {len(skills)} skills detected")
-    if len(action_verbs) >= 5:
-        strengths.append(f"Uses {len(action_verbs)} strong action verbs in bullet points")
-
-    validated = skill_validation.get('validated_skills', [])
-    if len(validated) >= 3:
-        strengths.append(f"{len(validated)} skills are backed by project/experience evidence")
-
-    if scores.get('formatting_score', 0) >= 16:
-        strengths.append("Well-formatted and ATS-friendly structure")
-    if scores.get('content_score', 0) >= 20:
-        strengths.append("Content quality is high with measurable achievements")
-
-    return strengths
+def analyze_resume(
+    file_data: bytes,
+    filename: str,
+    jd_text: Optional[str],
+    app_state,
+) -> Dict[str, Any]:
+    """
+    Main analysis pipeline that orchestrates the complete resume analysis.
+    
+    Args:
+        file_data: Raw bytes of the uploaded resume file
+        filename: Original filename of the resume
+        jd_text: Optional job description text for JD matching
+        app_state: FastAPI app state with loaded NLP models (nlp, embedder)
+        
+    Returns:
+        Complete analysis result dictionary with all scores, feedback, and recommendations
+    """
+    logger.info(f"=== Starting analysis for: {filename} ===")
+    
+    # Step 1: Extract text from the uploaded file
+    resume_text, metadata = _extract_text_from_file(file_data, filename)
+    
+    # Step 2: Parse resume with Groq LLM
+    parsed_data = _parse_resume_with_groq(resume_text)
+    parsed_data['raw_text'] = resume_text
+    
+    # Step 3: Parse job description if provided
+    jd_data = None
+    if jd_text and jd_text.strip():
+        jd_data = _parse_jd_with_groq(jd_text)
+        jd_data['raw_text'] = jd_text
+    
+    # Step 4: Compute skill validation
+    skill_validation = _compute_skill_validation(parsed_data)
+    
+    # Step 5: Compute component scores & penalties/bonuses
+    jd_keywords = jd_data.get('keywords', []) if jd_data else None
+    component_scores = compute_component_scores(
+        parsed_data=parsed_data,
+        jd_keywords=jd_keywords,
+        skill_validation=skill_validation,
+    )
+    penalties, bonuses = compute_penalties_and_bonuses(
+        parsed_data=parsed_data,
+        component_scores=component_scores,
+        skill_validation=skill_validation,
+    )
+    
+    # Step 6: Compute overall ATS score
+    ats_score = compute_ats_score(component_scores)
+    interpretation = generate_score_interpretation(ats_score)
+    
+    # Step 7: Perform JD matching if JD text was provided
+    jd_match = None
+    if jd_data:
+        try:
+            jd_match = _perform_jd_matching(resume_text, parsed_data, jd_data, app_state)
+        except Exception as e:
+            logger.warning(f"JD matching failed (continuing without it): {e}")
+            jd_match = None
+    
+    # Step 8: Generate detailed feedback
+    missing_keywords = jd_match.get('missing_keywords', []) if jd_match else None
+    issues = generate_all_feedback(
+        parsed_data=parsed_data,
+        component_scores=component_scores,
+        jd_keywords=jd_keywords,
+        missing_keywords=missing_keywords,
+        skill_validation=skill_validation,
+    )
+    issues_summary = generate_issues_summary(issues)
+    
+    # Step 9: Generate recommendations
+    recommendations = generate_recommendations(
+        parsed_data=parsed_data,
+        component_scores=component_scores,
+        issues=issues,
+        jd_match=jd_match or {},
+    )
+    
+    # Step 10: Build structured candidate profile and privacy analysis
+    location_analysis = _analyze_location_and_privacy(parsed_data, resume_text)
+    
+    experience = parsed_data.get('experience', [])
+    total_experience_months = sum(
+        int(e.get('duration_months', 0))
+        for e in experience
+        if isinstance(e, dict) and str(e.get('duration_months', 0)).isdigit()
+    )
+    
+    resume_profile = {
+        'candidate_info': {
+            'name': parsed_data.get('name', ''),
+            'email': parsed_data.get('email', ''),
+            'phone': parsed_data.get('phone', ''),
+            'linkedin': parsed_data.get('linkedin', ''),
+            'github': parsed_data.get('github', ''),
+            'portfolio': parsed_data.get('portfolio', ''),
+        },
+        'professional_summary': parsed_data.get('professional_summary', ''),
+        'experience': experience,
+        'education': parsed_data.get('education', []),
+        'projects': parsed_data.get('projects', []),
+        'certifications': parsed_data.get('certifications', []),
+        'action_verbs': parsed_data.get('action_verbs', []),
+        'keywords': parsed_data.get('keywords', []),
+        'total_experience_months': total_experience_months,
+    }
+    
+    # Step 11: Build complete result matching all frontend variable expectations
+    result = {
+        # Core scores
+        'ats_score': ats_score,
+        'ATS_score': ats_score,
+        'component_scores': component_scores,
+        'interpretation': interpretation,
+        
+        # Recommendations & Feedback
+        'recommendations': recommendations['recommendations'],
+        'recommendation_summary': recommendations['recommendation_summary'],
+        'estimated_improvement': recommendations['estimated_improvement'],
+        'suggestions': recommendations['suggestions'],
+        'strengths': recommendations['strengths'],
+        'critical_issues': recommendations['critical_issues'],
+        'warnings': recommendations['warnings'],
+        'issues_summary': issues_summary,
+        'detailed_feedback': [issue.dict() if hasattr(issue, 'dict') else issue for issue in issues],
+        
+        # Candidate Profile & Privacy
+        'resume_profile': resume_profile,
+        'parsed_data': parsed_data,
+        'location_analysis': location_analysis,
+        
+        # Skill validation & Keywords
+        'skill_validation_details': skill_validation,
+        'keyword_match': round((component_scores.get('keywords', 0) / 25.0) * 100, 1),
+        'missing_keywords': missing_keywords or [],
+        'matched_keywords': jd_match.get('matched_keywords', []) if jd_match else [],
+        'skills': parsed_data.get('skills', []),
+        'experience_months': total_experience_months,
+        
+        # Score adjustments
+        'penalties': penalties,
+        'bonuses': bonuses,
+        
+        # JD matching
+        'jd_match_analysis': jd_match,
+        'jd_comparison': jd_match,
+        'parsed_jd': jd_data,
+        
+        # Metadata
+        'filename': filename,
+        'metadata': metadata,
+    }
+    
+    logger.info(f"=== Analysis complete for: {filename} (ATS Score: {ats_score:.1f}) ===")
+    return result

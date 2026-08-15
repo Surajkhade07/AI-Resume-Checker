@@ -1,0 +1,2 @@
+# This directory is required by modules.json for the Normalize layer.
+# The Normalize module is parameterless, so no config files are needed here.

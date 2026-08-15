@@ -186,7 +186,18 @@ export async function analyzeResume({
   )
 
   formData.append(
+    'file',
+    resumeFile,
+    resumeFile.name
+  )
+
+  formData.append(
     'job_description',
+    jobDescription || ''
+  )
+
+  formData.append(
+    'jd_text',
     jobDescription || ''
   )
 
@@ -450,6 +461,10 @@ export async function analyzeResume({
 export async function getHistory(
   accessToken
 ) {
+  if (!accessToken) {
+    return []
+  }
+
   let res
 
   try {

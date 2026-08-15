@@ -1,27 +1,103 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# =========================================================================
+# ATS Resume Analyzer — Git Ignore Configuration
+# =========================================================================
 
-# Virtual environments
-.venv
+# ── Environment & Secrets ──
 .env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+*.pem
+*.key
+*.cert
 
-
-.DS_Store
-
+# ── Python & Bytecode ──
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 
+# ── Virtual Environments ──
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+conda/
 
-# Datasets
-*.csv
+# ── Node & Frontend Dependencies ──
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vercel
+.vercel
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.eslintcache
+vite.config.js.timestamp-*
 
-# Logs
+# ── Logs & Storage ──
 *.log
+logs/
+backend/logs/
+*.sqlite
+*.sqlite3
+*.db
 
-# ML models
+# ── Datasets & Large Weights (>100MB exceeds GitHub push limits) ──
+*.csv
+*.tsv
+*.parquet
 *.safetensors
+*.bin
+*.pt
+*.pth
+*.h5
 *.pkl
+*.onnx
+model/
+
+# Keep model configs & tokenizers if present
+!backend/bert_finetuned_model/config.json
+!backend/bert_finetuned_model/tokenizer.json
+!backend/bert_finetuned_model/tokenizer_config.json
+
+# ── OS & IDE Artifacts ──
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~

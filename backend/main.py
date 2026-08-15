@@ -1,299 +1,186 @@
-import asyncio
+"""
+Advanced ATS Resume Analyzer API — Main Application Entry Point.
+Initializes FastAPI with middleware, model loading, and startup validation.
+"""
 import logging
-import os
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-import spacy
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from backend.core.config import (
     ALLOWED_ORIGINS,
     APP_DESCRIPTION,
-    APP_NAME,
+    APP_ENVIRONMENT,
+    APP_TITLE,
     APP_VERSION,
-    SPACY_MODEL_PRIMARY,
-    SPACY_MODEL_SECONDARY,
-    SENTENCE_TRANSFORMER_MODEL,
+    LOG_LEVEL,
+    LOG_FORMAT,
+    BERT_MODEL_ENABLED,
+    validate_config,
 )
-from backend.api.route import router
+from backend.api.routes import router
+from backend.core.middleware import register_middleware
+from backend.services.model_loader import initialize_model_state
 
+# ---------------------------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------------------------
+log_dir = Path(__file__).resolve().parent / 'logs'
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / 'ats_scorer.log'
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format=LOG_FORMAT,
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            log_file,
+            delay=True,
+        ),
+    ],
 )
-
-logger = logging.getLogger("ats_resume_scorer")
-
-
-async def _load_spacy():
-    logger.info(
-        "Loading spaCy model: %s",
-        SPACY_MODEL_PRIMARY,
-    )
-
-    try:
-        nlp = await asyncio.to_thread(
-            spacy.load,
-            SPACY_MODEL_PRIMARY,
-        )
-
-        logger.info(
-            "spaCy model loaded: %s",
-            SPACY_MODEL_PRIMARY,
-        )
-
-        return nlp
-
-    except OSError:
-        logger.warning(
-            "spaCy model %s not found. Trying %s",
-            SPACY_MODEL_PRIMARY,
-            SPACY_MODEL_SECONDARY,
-        )
-
-        try:
-            nlp = await asyncio.to_thread(
-                spacy.load,
-                SPACY_MODEL_SECONDARY,
-            )
-
-            logger.info(
-                "Fallback spaCy model loaded: %s",
-                SPACY_MODEL_SECONDARY,
-            )
-
-            return nlp
-
-        except Exception as exc:
-            logger.exception(
-                "Fallback spaCy model failed: %s",
-                exc,
-            )
-
-            return spacy.blank("en")
-
-    except Exception as exc:
-        logger.exception(
-            "Unexpected spaCy loading error: %s",
-            exc,
-        )
-
-        return spacy.blank("en")
-
-
-async def _load_embedder():
-    logger.info(
-        "Loading Sentence Transformer: %s",
-        SENTENCE_TRANSFORMER_MODEL,
-    )
-
-    try:
-        from sentence_transformers import SentenceTransformer
-
-        embedder = await asyncio.to_thread(
-            SentenceTransformer,
-            SENTENCE_TRANSFORMER_MODEL,
-            device="cpu",
-        )
-
-        try:
-            embedder.max_seq_length = 256
-        except Exception:
-            pass
-
-        logger.info(
-            "Sentence Transformer loaded: %s",
-            SENTENCE_TRANSFORMER_MODEL,
-        )
-
-        return embedder
-
-    except Exception as exc:
-        logger.exception(
-            "Sentence Transformer loading failed: %s",
-            exc,
-        )
-
-        return None
-
-
-async def initialize_models(app: FastAPI):
-    app.state.models_ready = False
-    app.state.models_error = None
-
-    try:
-        logger.info("STEP 1/2: Loading spaCy")
-
-        app.state.nlp = await _load_spacy()
-
-        logger.info("STEP 1/2 completed")
-
-        logger.info(
-            "STEP 2/2: Loading Sentence Transformer"
-        )
-
-        app.state.embedder = await _load_embedder()
-
-        if app.state.embedder is None:
-            app.state.models_error = (
-                "Sentence Transformer failed to load."
-            )
-
-            app.state.models_ready = False
-
-            logger.error(
-                "AI models are not ready."
-            )
-
-            return
-
-        app.state.models_ready = True
-        app.state.models_error = None
-
-        logger.info(
-            "========================================"
-        )
-        logger.info(
-            "ALL MODELS LOADED"
-        )
-        logger.info(
-            "API IS READY"
-        )
-        logger.info(
-            "========================================"
-        )
-
-    except Exception as exc:
-        logger.exception(
-            "Model initialization failed: %s",
-            exc,
-        )
-
-        app.state.models_error = str(exc)
-        app.state.models_ready = False
+logger = logging.getLogger('ats_resume_scorer')
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(
-        "========================================"
-    )
-    logger.info(
-        "Starting ATS Resume Analysis API"
-    )
-    logger.info(
-        "========================================"
-    )
+    """
+    Application lifespan handler — runs on startup and shutdown.
+    Loads NLP models, validates configuration, and initializes services.
+    """
+    # ---- STARTUP ----
+    logger.info(f"{'='*50}")
+    logger.info(f"Starting {APP_TITLE} v{APP_VERSION} ({APP_ENVIRONMENT} mode)")
+    logger.info(f"{'='*50}")
+    
+    # Validate configuration
+    config_warnings = validate_config()
+    for warning in config_warnings:
+        logger.warning(f"Config: {warning}")
+    if not config_warnings:
+        logger.info("Configuration validation passed")
+    
+    # Initialize lightweight app state. Heavier NLP models load lazily on demand.
+    initialize_model_state(app.state)
+    logger.info("Model loading deferred until a request needs NLP or embedding features")
 
-    app.state._job_results = {}
-
-    app.state.nlp = None
-    app.state.embedder = None
-
-    app.state.models_ready = False
-    app.state.models_error = None
-
-    app.state.analysis_semaphore = asyncio.Semaphore(1)
-
-    model_task = asyncio.create_task(
-        initialize_models(app)
-    )
-
-    logger.info(
-        "FastAPI server startup completed"
-    )
-
-    yield
-
-    logger.info(
-        "Shutting down ATS Resume Analysis API"
-    )
-
-    if not model_task.done():
-        model_task.cancel()
-
-        try:
-            await model_task
-        except asyncio.CancelledError:
-            pass
-
-    app.state.nlp = None
-    app.state.embedder = None
-    app.state._job_results = {}
-
-    logger.info(
-        "API shutdown complete"
-    )
+    # Load BERT model (if enabled and available)
+    if BERT_MODEL_ENABLED:
+        from backend.services.bert_skill_extractor import get_model_info
+        model_info = get_model_info()
+        if model_info.get('model_exists'):
+            logger.info(f"BERT model found at: {model_info['model_path']}")
+        else:
+            logger.info("BERT model not found — skill extraction will use spaCy only")
+    
+    logger.info("API is ready to serve requests; heavy NLP models will load on demand.")
+    logger.info(f"{'='*50}")
+    
+    yield  # Application runs here
+    
+    # ---- SHUTDOWN ----
+    logger.info("Shutting down API server...")
+    logger.info("Goodbye!")
 
 
+# ---------------------------------------------------------------------------
+# FastAPI Application
+# ---------------------------------------------------------------------------
 app = FastAPI(
-    title=APP_NAME,
+    title=APP_TITLE,
     description=APP_DESCRIPTION,
     version=APP_VERSION,
     lifespan=lifespan,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    docs_url='/docs',
+    redoc_url='/redoc',
+    contact={
+        "name": "ATS Resume Analyzer",
+    },
+   
 )
 
-
+# ---------------------------------------------------------------------------
+# CORS Middleware
+# ---------------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
-    allow_origin_regex=(
-        r"https?://(localhost|127\.0\.0\.1)(:\d+)?"
-    ),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=['*'],
+    allow_headers=['*'],
+    expose_headers=['X-API-Key', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
 )
 
+# ---------------------------------------------------------------------------
+# Custom Middleware (rate limiting, logging, security headers)
+# ---------------------------------------------------------------------------
+register_middleware(app)
 
-app.include_router(router)
-
-
-@app.get("/health")
-async def root_health():
-    return {
-        "status": "healthy",
-        "service": APP_NAME,
-    }
-
-
-@app.get("/ready")
-async def root_ready():
-    if not getattr(
-        app.state,
-        "models_ready",
-        False,
-    ):
-        return {
-            "status": "starting",
-            "models_ready": False,
-            "error": getattr(
-                app.state,
-                "models_error",
-                None,
-            ),
-        }
-
-    return {
-        "status": "ready",
-        "models_ready": True,
-    }
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    port = int(
-        os.getenv("PORT", "8000")
+# ---------------------------------------------------------------------------
+# Global Exception Handler
+# ---------------------------------------------------------------------------
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler for unhandled errors."""
+    logger.error(f"Unhandled error: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "An internal server error occurred. Please try again later.",
+            "error_type": type(exc).__name__,
+            "path": request.url.path,
+        },
     )
 
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+app.include_router(router)
+
+# ---------------------------------------------------------------------------
+# Root Endpoint
+# ---------------------------------------------------------------------------
+@app.get('/')
+async def root():
+    """Root endpoint with API overview."""
+    return {
+        'name': APP_TITLE,
+        'version': APP_VERSION,
+        'environment': APP_ENVIRONMENT,
+        'endpoints': {
+            'POST   /api/v1/analyze-resume':         'Analyze a single resume',
+            'POST   /api/v1/analyze-base64':          'Analyze resume from base64 data',
+            'POST   /api/v1/batch-analyze':           'Analyze multiple resumes',
+            'GET    /api/v1/batch/{job_id}':          'Get batch analysis status',
+            'GET    /api/v1/batch-jobs':              'List all batch jobs',
+            'GET    /api/v1/history':                 'Get user analysis history',
+            'DELETE /api/v1/history/{id}':            'Delete a history entry',
+            'GET    /api/v1/health':                  'Health check with detailed status',
+            'POST   /api/v1/generate-pdf':            'Generate PDF report from data',
+            'POST   /api/v1/generate-html-report':    'Generate HTML report from data',
+            'POST   /api/v1/auth/login':              'Login and get JWT token',
+            'POST   /api/v1/auth/api-key':            'Generate API key',
+            'GET    /api/v1/cache/stats':             'Get cache statistics',
+            'GET    /api/v1/models/bert':             'Get BERT model information',
+            'GET    /api/v1/config':                  'Get current configuration',
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Entry Point
+# ---------------------------------------------------------------------------
+if __name__ == '__main__':
+    import uvicorn
     uvicorn.run(
-        "backend.main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
+        'backend.main:app',
+        host='0.0.0.0',
+        port=8000,
+        reload=(APP_ENVIRONMENT == 'development'),
+        log_level=LOG_LEVEL.lower(),
     )

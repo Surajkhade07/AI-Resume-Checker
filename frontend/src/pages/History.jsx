@@ -15,7 +15,7 @@ function downloadBlob(blob, filename) {
 }
 
 export default function History({ setView }) {
-  const { accessToken, isAuthenticated } = useAuth()
+  const { accessToken, isAuthenticated, loading: authLoading } = useAuth()
   const { setAnalysis } = useAnalysis()
 
   const [history, setHistory] = useState(null)
@@ -26,6 +26,13 @@ export default function History({ setView }) {
   const [downloadingId, setDownloadingId] = useState(null)
 
   function loadHistory() {
+    if (authLoading) return
+    if (!isAuthenticated || !accessToken) {
+      setHistory([])
+      setLoading(false)
+      return
+    }
+
     setLoading(true)
     setError(null)
     getHistory(accessToken)
@@ -39,8 +46,10 @@ export default function History({ setView }) {
   }
 
   useEffect(() => {
-    loadHistory()
-  }, [isAuthenticated, accessToken])
+    if (!authLoading) {
+      loadHistory()
+    }
+  }, [isAuthenticated, accessToken, authLoading])
 
   async function handleDelete(id, filename) {
     if (!window.confirm(`Are you sure you want to delete the analysis for "${filename || 'this resume'}"?`)) {

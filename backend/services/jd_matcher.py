@@ -1,77 +1,57 @@
-from typing import List, Dict, Optional
+from typing import Dict, List
+
 import numpy as np
 import spacy
+from rapidfuzz import fuzz
 from sentence_transformers import SentenceTransformer
 
-from backend.util.matching import fuzzy_match_keywords, normalize_skill
-from rapidfuzz import fuzz
+from backend.utils.matching import fuzzy_match_keywords, normalize_skill
 
 
 def calculate_semantic_similarity(
-    resume_text: str, jd_text: str, embedder: Optional[SentenceTransformer] = None
+    resume_text: str, jd_text: str, embedder: SentenceTransformer
 ) -> float:
-    if not resume_text or not jd_text:
-        return 0.0
+    resume_emb = embedder.encode(resume_text[:5000], convert_to_tensor=False)
+    jd_emb     = embedder.encode(jd_text[:5000], convert_to_tensor=False)
 
-    if embedder is not None:
-        try:
-            resume_emb = embedder.encode(resume_text[:5000], convert_to_tensor=False)
-            jd_emb     = embedder.encode(jd_text[:5000], convert_to_tensor=False)
-
-            similarity = np.dot(resume_emb, jd_emb) / (
-                np.linalg.norm(resume_emb) * np.linalg.norm(jd_emb) + 1e-9
-            )
-            return float(np.clip(similarity, 0.0, 1.0))
-        except Exception:
-            pass
-
-    # Fallback to fuzzy token set ratio if embedder is unavailable
-    ratio = fuzz.token_set_ratio(resume_text[:3000], jd_text[:3000])
-    return float(ratio / 100.0)
+    similarity = np.dot(resume_emb, jd_emb) / (
+        np.linalg.norm(resume_emb) * np.linalg.norm(jd_emb)
+    )
+    return float(np.clip(similarity, 0.0, 1.0))
 
 
 def identify_matched_keywords(
     resume_keywords: List[str], jd_keywords: List[str]
 ) -> List[str]:
-    result = fuzzy_match_keywords(resume_keywords or [], jd_keywords or [], threshold=80)
+    result = fuzzy_match_keywords(resume_keywords, jd_keywords, threshold=80)
     return result['matched']
 
 
 def identify_missing_keywords(
     resume_keywords: List[str], jd_keywords: List[str], top_n: int = 15
 ) -> List[str]:
-    result = fuzzy_match_keywords(resume_keywords or [], jd_keywords or [], threshold=80)
+
+    result = fuzzy_match_keywords(resume_keywords, jd_keywords, threshold=80)
     return result['missing'][:top_n]
 
 
 def analyze_skills_gap(
-    resume_skills: List[str], jd_text: str, nlp: Optional[spacy.Language] = None
+    resume_skills: List[str], jd_text: str, nlp: spacy.Language
 ) -> List[str]:
+    doc       = nlp(jd_text[:5000])
     jd_skills = set()
 
-    if nlp is not None:
-        try:
-            doc = nlp(jd_text[:5000])
-            for ent in doc.ents:
-                if ent.label_ in ['PRODUCT', 'ORG', 'LANGUAGE']:
-                    jd_skills.add(ent.text.lower())
+    for ent in doc.ents:
+        if ent.label_ in ['PRODUCT', 'ORG', 'LANGUAGE']:
+            jd_skills.add(ent.text.lower())
 
-            for chunk in doc.noun_chunks:
-                ct = chunk.text.lower().strip()
-                if 1 <= len(ct.split()) <= 4:
-                    jd_skills.add(ct)
-        except Exception:
-            pass
-
-    if not jd_skills:
-        # Simple word token fallback
-        for word in jd_text.split():
-            cleaned = word.strip('.,;:!?()[]{}"\'').lower()
-            if len(cleaned) > 2:
-                jd_skills.add(cleaned)
+    for chunk in doc.noun_chunks:
+        ct = chunk.text.lower().strip()
+        if 1 <= len(ct.split()) <= 4:
+            jd_skills.add(ct)
 
     # Normalize resume skills for comparison
-    resume_normalized = {normalize_skill(s) for s in (resume_skills or [])}
+    resume_normalized = {normalize_skill(s) for s in resume_skills}
 
     gap = []
     for jd_skill in jd_skills:
@@ -111,8 +91,8 @@ def compare_resume_with_jd(
     resume_skills: List[str],
     jd_text: str,
     jd_keywords: List[str],
-    embedder: Optional[SentenceTransformer] = None,
-    nlp: Optional[spacy.Language] = None,
+    embedder: SentenceTransformer,
+    nlp: spacy.Language,
 ) -> Dict:
     semantic_similarity = calculate_semantic_similarity(resume_text, jd_text, embedder)
     matched_keywords    = identify_matched_keywords(resume_keywords, jd_keywords)
@@ -123,8 +103,8 @@ def compare_resume_with_jd(
     )
 
     return {
-        'match_percentage':    round(match_percentage, 1),
-        'semantic_similarity': round(semantic_similarity, 2),
+        'match_percentage':    match_percentage,
+        'semantic_similarity': semantic_similarity,
         'matched_keywords':    matched_keywords,
         'missing_keywords':    missing_keywords,
         'skills_gap':          skills_gap,
