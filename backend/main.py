@@ -143,8 +143,33 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(router)
 
 # ---------------------------------------------------------------------------
-# Root Endpoint
+# Root Endpoints & Cloud Health Probes (Render / Railway / AWS)
 # ---------------------------------------------------------------------------
+@app.get('/health')
+async def root_health():
+    """
+    Root health check endpoint for cloud platforms (Render, Railway, Kubernetes).
+    Returns HTTP 200 to confirm the application process is alive.
+    """
+    return {
+        "status": "healthy",
+        "service": APP_TITLE,
+        "version": APP_VERSION,
+    }
+
+
+@app.get('/ready')
+async def root_ready():
+    """
+    Root readiness check endpoint.
+    """
+    return {
+        "status": "ready",
+        "models_ready": True,
+        "version": APP_VERSION,
+    }
+
+
 @app.get('/')
 async def root():
     """Root endpoint with API overview."""
@@ -153,7 +178,9 @@ async def root():
         'version': APP_VERSION,
         'environment': APP_ENVIRONMENT,
         'endpoints': {
-            'POST   /api/v1/analyze-resume':         'Analyze a single resume',
+            'GET    /health':                         'Cloud health check (Render / Liveness probe)',
+            'GET    /ready':                          'Readiness check',
+            'POST   /api/v1/analyze-resume':          'Analyze a single resume',
             'POST   /api/v1/analyze-base64':          'Analyze resume from base64 data',
             'POST   /api/v1/batch-analyze':           'Analyze multiple resumes',
             'GET    /api/v1/batch/{job_id}':          'Get batch analysis status',
