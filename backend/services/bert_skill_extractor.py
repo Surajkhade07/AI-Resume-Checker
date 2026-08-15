@@ -9,14 +9,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import torch
-from transformers import (
-    AutoConfig,
-    AutoModelForTokenClassification,
-    AutoTokenizer,
-    pipeline,
-)
-
 from backend.core.cache import nlp_model_cache
 
 logger = logging.getLogger('ats_resume_scorer')
@@ -25,7 +17,7 @@ logger = logging.getLogger('ats_resume_scorer')
 BERT_MODEL_PATH = Path(__file__).resolve().parent.parent / 'bert_finetuned_model'
 
 
-def _load_bert_pipeline() -> Optional[pipeline]:
+def _load_bert_pipeline() -> Optional[Any]:
     """
     Load the fine-tuned BERT model for token classification (NER).
     Uses caching to avoid reloading on every request.
@@ -51,6 +43,7 @@ def _load_bert_pipeline() -> Optional[pipeline]:
         return None
     
     try:
+        from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
         logger.info(f"Loading fine-tuned BERT model from {BERT_MODEL_PATH}")
         
         # Load tokenizer and model
