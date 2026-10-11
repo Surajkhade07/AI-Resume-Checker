@@ -163,13 +163,6 @@ export async function analyzeResume({
     )
   }
 
-  if (!accessToken) {
-    throw new ApiError(
-      'Authentication token is missing. Please sign in again.',
-      401
-    )
-  }
-
   if (!BACKEND_URL) {
     throw new ApiError(
       'Backend URL is not configured.',
@@ -461,10 +454,6 @@ export async function analyzeResume({
 export async function getHistory(
   accessToken
 ) {
-  if (!accessToken) {
-    return []
-  }
-
   let res
 
   try {

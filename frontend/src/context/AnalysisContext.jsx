@@ -35,10 +35,6 @@ export function AnalysisProvider({ children }) {
 
   async function startAnalysis(accessToken) {
     if (!resumeFile) return
-    if (!accessToken) {
-      setError('Sign in from the top bar to analyze a resume.')
-      return
-    }
 
     const currentRun = ++activeAnalysisRef.current
     setError(null)
@@ -60,6 +56,26 @@ export function AnalysisProvider({ children }) {
       if (activeAnalysisRef.current === currentRun) {
         setAnalysis(result)
         setProgressMsg('')
+
+        // Persist to local storage for instant availability in History
+        try {
+          const stored = JSON.parse(localStorage.getItem('ats_analysis_history') || '[]')
+          const newEntry = {
+            id: result.record_id || `scan_${Date.now()}`,
+            filename: resumeFile.name,
+            resume_name: resumeFile.name,
+            ats_score: result.ats_score ?? result.ATS_score ?? 0,
+            keyword_match: result.keyword_match ?? 0,
+            created_at: new Date().toISOString(),
+            date: new Date().toISOString(),
+            analysis_result: result,
+            analysis_data: result,
+          }
+          const updated = [newEntry, ...stored.filter((i) => i.id !== newEntry.id)]
+          localStorage.setItem('ats_analysis_history', JSON.stringify(updated.slice(0, 50)))
+        } catch {
+          // localStorage may be unavailable or full
+        }
       }
     } catch (e) {
       if (activeAnalysisRef.current === currentRun) {

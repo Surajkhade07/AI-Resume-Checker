@@ -140,19 +140,18 @@ async def analyze_resume_endpoint(
             app_state=request.app.state,
         )
         
-        # Store in Supabase database if user is authenticated
+        # Store in database (SQLite + Supabase)
         record_id = None
-        if user_id and user_id != "anonymous":
-            try:
-                from backend.database.supabase_db import store_analysis_result
-                record_id = store_analysis_result(
-                    user_id=user_id,
-                    filename=upload_file.filename,
-                    analysis_data=result,
-                    raw_text=result.get('parsed_data', {}).get('raw_text'),
-                )
-            except Exception as db_err:
-                logger.warning(f"Could not persist analysis record to database: {db_err}")
+        try:
+            from backend.database.supabase_db import store_analysis_result
+            record_id = store_analysis_result(
+                user_id=user_id or "anonymous",
+                filename=upload_file.filename,
+                analysis_data=result,
+                raw_text=result.get('parsed_data', {}).get('raw_text'),
+            )
+        except Exception as db_err:
+            logger.warning(f"Could not persist analysis record to database: {db_err}")
         
         result['record_id'] = record_id
         return result
@@ -199,18 +198,17 @@ async def analyze_resume_base64(
         )
         
         record_id = None
-        if effective_user_id and effective_user_id != "anonymous":
-            try:
-                from backend.database.supabase_db import store_analysis_result
-                record_id = store_analysis_result(
-                    user_id=effective_user_id,
-                    filename=filename,
-                    analysis_data=result,
-                    raw_text=result.get('parsed_data', {}).get('raw_text'),
-                )
-            except Exception as db_err:
-                logger.warning(f"Could not persist analysis record to database: {db_err}")
-                
+        try:
+            from backend.database.supabase_db import store_analysis_result
+            record_id = store_analysis_result(
+                user_id=effective_user_id or "anonymous",
+                filename=filename,
+                analysis_data=result,
+                raw_text=result.get('parsed_data', {}).get('raw_text'),
+            )
+        except Exception as db_err:
+            logger.warning(f"Could not persist analysis record to database: {db_err}")
+            
         result['record_id'] = record_id
         return result
         
@@ -220,7 +218,7 @@ async def analyze_resume_base64(
 
 
 # =========================================================================
-# History Management (Supabase)
+# History Management (SQLite & Supabase)
 # =========================================================================
 
 @router.get("/history")
@@ -230,22 +228,21 @@ async def get_history_endpoint(
     offset: int = 0,
 ):
     """
-    Retrieve analysis history records for the currently authenticated user.
-    Returns empty list if anonymous or not authenticated.
+    Retrieve analysis history records.
+    Returns records for the current user or local records if anonymous.
     """
-    if not user_id or user_id == "anonymous":
-        return []
-        
     try:
         from backend.database.supabase_db import get_user_history
         records = get_user_history(user_id=user_id, limit=limit, offset=offset)
         
         formatted = []
         for r in records:
-            analysis_data = r.get('analysis_data') or {}
+            analysis_data = r.get('analysis_data') or r.get('analysis_result') or {}
             formatted.append({
                 'id': r.get('id'),
-                'filename': r.get('filename') or analysis_data.get('filename', 'resume.pdf'),
+                'filename': r.get('filename') or r.get('resume_name') or analysis_data.get('filename', 'resume.pdf'),
+                'resume_name': r.get('resume_name') or r.get('filename') or 'resume.pdf',
+                'job_title': r.get('job_title') or 'Software Engineer',
                 'ats_score': r.get('ats_score') or analysis_data.get('ats_score', 0),
                 'keyword_match': r.get('keyword_match') or analysis_data.get('keyword_match', 0),
                 'created_at': r.get('created_at'),
@@ -262,7 +259,7 @@ async def get_history_endpoint(
 @router.delete("/history/{record_id}")
 async def delete_history_endpoint(
     record_id: str,
-    user_id: str = Depends(get_current_user),
+    user_id: str = Depends(get_optional_user),
 ):
     """
     Delete a specific analysis record belonging to the user.
@@ -271,7 +268,7 @@ async def delete_history_endpoint(
         from backend.database.supabase_db import delete_analysis_record
         success = delete_analysis_record(record_id=record_id, user_id=user_id)
         if not success:
-            raise HTTPException(status_code=404, detail="History record not found or not owned by user")
+            raise HTTPException(status_code=404, detail="History record not found")
         return {"message": "Record deleted successfully", "id": record_id}
     except HTTPException:
         raise
@@ -294,8 +291,8 @@ async def get_history_pdf_endpoint(
         if not record:
             raise HTTPException(status_code=404, detail="Analysis record not found")
         
-        analysis_data = record.get('analysis_data') or {}
-        filename = record.get('filename', 'resume.pdf')
+        analysis_data = record.get('analysis_data') or record.get('analysis_result') or {}
+        filename = record.get('filename') or record.get('resume_name') or 'resume.pdf'
         pdf_bytes = generate_pdf_report(analysis_data=analysis_data, filename=f"ATS_Report_{filename}.pdf")
         
         return Response(

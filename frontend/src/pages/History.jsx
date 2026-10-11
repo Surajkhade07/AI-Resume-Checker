@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useAuth } from '../context/AuthContext.jsx'
 import { useAnalysis } from '../context/AnalysisContext.jsx'
-import { getHistory, deleteHistoryEntry, getHistoryPdf, ApiError } from '../lib/api.js'
+import { getHistory, deleteHistoryEntry, getHistoryPdf, generatePdf, ApiError } from '../lib/api.js'
 import { COMPONENTS, formatDate, getScoreTone, getScoreEmoji } from '../lib/scoreHelpers.js'
 import ResultsDashboard from '../components/ResultsDashboard.jsx'
 
@@ -12,6 +12,23 @@ function downloadBlob(blob, filename) {
   a.download = filename
   a.click()
   URL.revokeObjectURL(url)
+}
+
+function getLocalHistory() {
+  try {
+    const raw = localStorage.getItem('ats_analysis_history')
+    return raw ? JSON.parse(raw) : []
+  } catch {
+    return []
+  }
+}
+
+function saveLocalHistory(list) {
+  try {
+    localStorage.setItem('ats_analysis_history', JSON.stringify(list))
+  } catch {
+    // Ignore storage errors
+  }
 }
 
 export default function History({ setView }) {
@@ -27,20 +44,36 @@ export default function History({ setView }) {
 
   function loadHistory() {
     if (authLoading) return
-    if (!isAuthenticated || !accessToken) {
-      setHistory([])
-      setLoading(false)
-      return
-    }
 
     setLoading(true)
     setError(null)
+    const localItems = getLocalHistory()
+
     getHistory(accessToken)
-      .then((data) => {
-        setHistory(Array.isArray(data) ? data : [])
+      .then((backendData) => {
+        const backendList = Array.isArray(backendData) ? backendData : []
+        const seenIds = new Set()
+        const merged = []
+
+        for (const item of [...backendList, ...localItems]) {
+          const id = String(item.id || '')
+          if (id && !seenIds.has(id)) {
+            seenIds.add(id)
+            merged.push(item)
+          }
+        }
+
+        merged.sort((a, b) => new Date(b.created_at || b.date || 0) - new Date(a.created_at || a.date || 0))
+        setHistory(merged)
+        saveLocalHistory(merged.slice(0, 50))
       })
       .catch((e) => {
-        setError(e instanceof ApiError ? e.message : `Could not load history: ${e.message}`)
+        if (localItems.length > 0) {
+          setHistory(localItems)
+        } else {
+          setError(e instanceof ApiError ? e.message : `Could not load history: ${e.message}`)
+          setHistory([])
+        }
       })
       .finally(() => setLoading(false))
   }
@@ -56,8 +89,14 @@ export default function History({ setView }) {
       return
     }
     try {
-      await deleteHistoryEntry(id, accessToken)
-      setHistory((h) => (h || []).filter((entry) => entry.id !== id))
+      if (id && !String(id).startsWith('scan_') && !String(id).startsWith('local_')) {
+        await deleteHistoryEntry(id, accessToken).catch(() => {})
+      }
+      setHistory((h) => {
+        const updated = (h || []).filter((entry) => entry.id !== id)
+        saveLocalHistory(updated)
+        return updated
+      })
     } catch (e) {
       setError(e instanceof ApiError ? e.message : `Delete failed: ${e.message}`)
     }
@@ -66,8 +105,28 @@ export default function History({ setView }) {
   async function handleDownloadPdf(id, filename) {
     setDownloadingId(id)
     try {
-      const blob = await getHistoryPdf(id, accessToken)
-      downloadBlob(blob, `ats_report_${filename || 'resume'}.pdf`)
+      let blob = null
+      if (id && !String(id).startsWith('scan_') && !String(id).startsWith('local_')) {
+        try {
+          blob = await getHistoryPdf(id, accessToken)
+        } catch {
+          blob = null
+        }
+      }
+
+      if (!blob) {
+        const item = (history || []).find((h) => h.id === id)
+        const analysisData = item?.analysis_result || item?.analysis_data
+        if (analysisData) {
+          blob = await generatePdf(analysisData, accessToken)
+        }
+      }
+
+      if (blob) {
+        downloadBlob(blob, `ats_report_${filename || 'resume'}.pdf`)
+      } else {
+        throw new Error('Unable to create PDF report for this record.')
+      }
     } catch (e) {
       setError(e instanceof ApiError ? e.message : `PDF download failed: ${e.message}`)
     } finally {
@@ -76,8 +135,9 @@ export default function History({ setView }) {
   }
 
   function handleLoadIntoScorer(entry) {
-    if (entry.analysis_result) {
-      setAnalysis(entry.analysis_result)
+    const analysisData = entry.analysis_result || entry.analysis_data
+    if (analysisData) {
+      setAnalysis(analysisData)
       if (setView) setView('scorer')
     }
   }
@@ -102,7 +162,7 @@ export default function History({ setView }) {
         <div>
           <h1>📊 Analysis History & Records</h1>
           <p className="page-sub">
-            Past resumes and job description comparisons saved against your account.
+            Past resumes and job description comparisons saved to your record.
           </p>
         </div>
         <button className="btn btn-outline btn-sm" onClick={loadHistory} disabled={loading}>
@@ -111,14 +171,14 @@ export default function History({ setView }) {
       </div>
 
       {!isAuthenticated && (
-        <div className="alert warn">
-          ⚠️ Sign in from the top bar to view your persistent resume analyses.
+        <div className="alert info">
+          💡 Sign in from the top bar to back up your resume analyses to the cloud and sync across devices.
         </div>
       )}
 
       {error && <div className="alert bad">{error}</div>}
 
-      {isAuthenticated && history && history.length > 0 && (
+      {history && history.length > 0 && (
         <>
           {/* Stats Row */}
           <div className="history-stats-grid">
@@ -161,7 +221,7 @@ export default function History({ setView }) {
         </>
       )}
 
-      {isAuthenticated && history && history.length === 0 && !loading && (
+      {history && history.length === 0 && !loading && (
         <div className="empty-state">
           <span className="empty-icon">📂</span>
           <h3>No Resume Analyses Yet</h3>
@@ -178,7 +238,7 @@ export default function History({ setView }) {
           const id = entry.id
           const score = Math.round(Number(entry.ats_score || 0))
           const tone = getScoreTone(score)
-          const result = entry.analysis_result || {}
+          const result = entry.analysis_result || entry.analysis_data || {}
           const compScores = result.component_scores || {}
           const jd = result.jd_comparison || result.jd_match_analysis
           const recCount = (result.recommendations || []).length
@@ -190,7 +250,7 @@ export default function History({ setView }) {
                 <div className="history-card-info">
                   <span className="file-avatar">📄</span>
                   <div>
-                    <h3 className="history-card-filename">{entry.filename || 'resume.pdf'}</h3>
+                    <h3 className="history-card-filename">{entry.filename || entry.resume_name || 'resume.pdf'}</h3>
                     <div className="history-card-meta">
                       <span>📅 {formatDate(entry.created_at || entry.date)}</span>
                       {skillCount > 0 && <span>• 🎯 {skillCount} skills detected</span>}
@@ -233,7 +293,7 @@ export default function History({ setView }) {
               <div className="history-card-actions">
                 <button
                   className="btn btn-primary btn-sm"
-                  onClick={() => setModalAnalysis({ filename: entry.filename, data: result })}
+                  onClick={() => setModalAnalysis({ filename: entry.filename || entry.resume_name, data: result })}
                 >
                   👁️ View Full Analysis Dashboard
                 </button>
@@ -246,13 +306,13 @@ export default function History({ setView }) {
                 <button
                   className="btn btn-outline btn-sm"
                   disabled={downloadingId === id}
-                  onClick={() => handleDownloadPdf(id, entry.filename)}
+                  onClick={() => handleDownloadPdf(id, entry.filename || entry.resume_name)}
                 >
                   {downloadingId === id ? 'Generating…' : '📑 Download PDF'}
                 </button>
                 <button
                   className="btn btn-danger-ghost btn-sm"
-                  onClick={() => handleDelete(id, entry.filename)}
+                  onClick={() => handleDelete(id, entry.filename || entry.resume_name)}
                   title="Delete from history"
                 >
                   🗑️ Delete
@@ -298,4 +358,3 @@ export default function History({ setView }) {
     </div>
   )
 }
-

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext.jsx'
-import { signInWithPassword, signUpWithPassword, signInWithGoogle, signOut, isSupabaseConfigured } from '../lib/supabase'
+import { signInWithPassword, signUpWithPassword, signOut, isSupabaseConfigured } from '../lib/supabase'
 
 export default function AuthPanel({ onClose }) {
   const { isAuthenticated, userEmail } = useAuth()
@@ -54,13 +54,6 @@ export default function AuthPanel({ onClose }) {
     }
   }
 
-  async function google() {
-    setError(null)
-    const result = await signInWithGoogle()
-    if (result.error) setError(result.error)
-    else if (result.url) window.location.href = result.url
-  }
-
   return (
     <div className="auth-panel">
       <div className="auth-tabs">
@@ -94,11 +87,6 @@ export default function AuthPanel({ onClose }) {
           {busy ? 'Please wait…' : tab === 'signin' ? 'Sign in' : 'Create account'}
         </button>
       </form>
-
-      <div className="auth-divider"><span>or</span></div>
-      <button className="btn btn-outline btn-block" onClick={google}>
-        Continue with Google
-      </button>
     </div>
   )
 }

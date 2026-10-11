@@ -55,10 +55,6 @@ export default function Scorer() {
 
   async function handleAnalyze() {
     if (!resumeFile) return
-    if (!isAuthenticated) {
-      setError('Sign in from the top bar to analyze a resume.')
-      return
-    }
     await startAnalysis(accessToken)
   }
 
