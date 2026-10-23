@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext.jsx'
 import { useAnalysis } from '../context/AnalysisContext.jsx'
 import { generatePdf, ApiError } from '../lib/api.js'
 import ResultsDashboard from '../components/ResultsDashboard.jsx'
+import AuthPanel from '../components/AuthPanel.jsx'
 
 function summaryText(analysis) {
   const score = Number(analysis.ATS_score ?? analysis.ats_score ?? 0)
@@ -51,10 +52,16 @@ export default function Scorer() {
   } = useAnalysis()
 
   const [pdfBusy, setPdfBusy] = useState(false)
+  const [showAuthGate, setShowAuthGate] = useState(false)
   const fileInputRef = useRef(null)
 
   async function handleAnalyze() {
     if (!resumeFile) return
+    if (!isAuthenticated) {
+      setShowAuthGate(true)
+      return
+    }
+    setShowAuthGate(false)
     await startAnalysis(accessToken)
   }
 
@@ -143,15 +150,24 @@ export default function Scorer() {
       <div className="analyze-row">
         <button
           className="btn btn-primary btn-lg"
-          disabled={!resumeFile || loading}
+          disabled={!resumeFile || loading || !isAuthenticated}
           onClick={handleAnalyze}
+          title={!isAuthenticated ? 'Sign in to analyze your resume' : ''}
         >
           {loading ? (progressMsg || 'Analyzing resume...') : '🚀 Analyze Resume'}
         </button>
-        {!isAuthenticated && resumeFile && (
-          <p className="hint-warn">⚠️ Sign in from the top bar to analyze a resume.</p>
-        )}
       </div>
+
+      {!isAuthenticated && (
+        <div className="auth-gate-card">
+          <div className="auth-gate-icon">🔒</div>
+          <h3 className="auth-gate-title">Sign in to Analyze</h3>
+          <p className="auth-gate-desc">Create a free account or sign in to analyze your resume with AI-powered ATS scoring.</p>
+          <div className="auth-gate-panel">
+            <AuthPanel />
+          </div>
+        </div>
+      )}
 
       {loading && (
         <div className="analyzing-indicator">

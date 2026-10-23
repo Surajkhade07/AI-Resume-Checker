@@ -101,7 +101,7 @@ async def analyze_resume_endpoint(
     resume: Optional[UploadFile] = File(None, description="Alternative form field for resume file"),
     jd_text: Optional[str] = Form(None, description="Job description text for JD matching"),
     job_description: Optional[str] = Form(None, description="Alternative form field for JD text"),
-    user_id: str = Depends(get_optional_user),
+    user_id: str = Depends(get_current_user),
 ):
     """
     Analyze a single resume against ATS criteria.
